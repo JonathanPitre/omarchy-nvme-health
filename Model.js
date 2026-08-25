@@ -1,9 +1,19 @@
 // Pure formatting helpers for NVMe Health (no Qt).
 
+// Keep in sync with status.py MAX_JSON_BYTES (defense in depth before parse).
+var MAX_STATUS_CHARS = 32768
+
 function asInt(value, fallback) {
   var n = Number(value)
   if (!isFinite(n)) return fallback
   return Math.round(n)
+}
+
+function clampStatusText(text) {
+  var s = String(text || "")
+  if (s.length > MAX_STATUS_CHARS)
+    return s.substring(0, MAX_STATUS_CHARS)
+  return s
 }
 
 function formatHours(hours) {
@@ -39,8 +49,8 @@ function barLabel(disk, _needsSetup, unavailable) {
 
 function parseStatus(text) {
   try {
-    var data = JSON.parse(String(text || ""))
-    if (!data || typeof data !== "object") return null
+    var data = JSON.parse(clampStatusText(text))
+    if (!data || typeof data !== "object" || Array.isArray(data)) return null
     return data
   } catch (e) {
     return null
@@ -50,10 +60,12 @@ function parseStatus(text) {
 if (typeof module !== "undefined") {
   module.exports = {
     asInt: asInt,
+    clampStatusText: clampStatusText,
     formatHours: formatHours,
     formatTiB: formatTiB,
     formatPercent: formatPercent,
     barLabel: barLabel,
-    parseStatus: parseStatus
+    parseStatus: parseStatus,
+    MAX_STATUS_CHARS: MAX_STATUS_CHARS
   }
 }

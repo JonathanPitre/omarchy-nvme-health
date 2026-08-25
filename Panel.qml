@@ -26,7 +26,12 @@ Panel {
     if (!isFinite(n)) return 300
     return Math.max(60, Math.min(3600, Math.round(n)))
   }
-  readonly property string configuredDevice: String(setting("device", "") || "")
+  readonly property string configuredDevice: {
+    var s = String(setting("device", "") || "").trim()
+    // Keep in sync with status.py MAX_DEVICE_ARG_LEN.
+    if (s.length > 64) return s.substring(0, 64)
+    return s
+  }
 
   readonly property color contentForeground: bar ? bar.foreground : Color.foreground
   readonly property color contentDim: Qt.darker(contentForeground, 1.5)
@@ -58,19 +63,21 @@ Panel {
     if (proc.running) return
     loading = true
     lastError = ""
+    procWatchdog.restart()
     proc.running = true
   }
 
   function applyStatus(text) {
-    var parsed = Model.parseStatus(text)
+    var capped = Model.clampStatusText(text)
+    var parsed = Model.parseStatus(capped)
     if (!parsed) {
-      lastError = "Could not parse smartctl status"
+      lastError = "Could not parse status output"
       status = null
       return
     }
     status = parsed
     if (!parsed.ok && parsed.message)
-      lastError = String(parsed.message)
+      lastError = String(parsed.message).substring(0, 256)
   }
 
   function metricValue(key) {
@@ -96,6 +103,31 @@ Panel {
     onTriggered: root.refresh()
   }
 
+  // Keep in sync with status.py PROCESS_DEADLINE_SEC (+ small grace).
+  Timer {
+    id: procWatchdog
+    interval: 50000
+    repeat: false
+    onTriggered: {
+      if (!proc.running) return
+      proc.signal(15)
+      procKillTimer.restart()
+    }
+  }
+
+  Timer {
+    id: procKillTimer
+    interval: 2000
+    repeat: false
+    onTriggered: {
+      if (!proc.running) return
+      proc.signal(9)
+      root.loading = false
+      root.lastError = "status.py timed out"
+      root.status = null
+    }
+  }
+
   Component.onCompleted: Qt.callLater(root.refresh)
 
   Process {
@@ -107,18 +139,20 @@ Panel {
       id: statusStdout
       waitForEnd: true
     }
-    stderr: StdioCollector {
-      id: statusStderr
-      waitForEnd: true
-    }
+    // Do not attach a stderr collector: StdioCollector has no byte cap.
+    // status.py emits all errors as bounded JSON on stdout.
+    stderr: null
     onExited: function(exitCode) {
+      procWatchdog.stop()
+      procKillTimer.stop()
       root.loading = false
-      var out = String(statusStdout.text || "")
+      // Cap before parse/UI; status.py also refuses to emit > MAX_JSON_BYTES.
+      var out = Model.clampStatusText(statusStdout.text || "")
       if (out.trim() !== "") {
         root.applyStatus(out)
         return
       }
-      root.lastError = String(statusStderr.text || ("status.py failed (" + exitCode + ")")).trim()
+      root.lastError = "status.py failed (" + exitCode + ")"
       root.status = null
     }
   }
@@ -172,7 +206,9 @@ Panel {
           visible: root.lastError !== "" || (status && status.ok === false)
           text: root.lastError !== ""
             ? root.lastError
-            : (status && status.message ? String(status.message) : "Could not read disk SMART data.")
+            : (status && status.message
+                ? String(status.message).substring(0, 256)
+                : "Could not read disk SMART data.")
           color: root.warning ? (root.bar ? root.bar.urgent : Color.urgent) : root.contentDim
           font.family: root.contentFontFamily
           font.pixelSize: Style.font.bodySmall

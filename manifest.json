@@ -35,6 +35,7 @@
         "type": "string",
         "label": "Device path",
         "defaultValue": "",
+        "maxLength": 64,
         "description": "Empty selects the first NVMe (then first ATA drive) from UDisks2."
       }
     ]
