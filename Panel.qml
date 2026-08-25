@@ -18,10 +18,8 @@ Panel {
   property string lastError: ""
 
   readonly property var disk: status && status.disk ? status.disk : null
-  readonly property bool needsSetup: status ? status.needsSetup === true : false
-  readonly property bool missingSmartctl: status && status.error === "missing_smartctl"
-  readonly property bool warning: disk ? disk.warning === true : (needsSetup || missingSmartctl)
-  readonly property string label: Model.barLabel(disk, needsSetup, missingSmartctl)
+  readonly property bool warning: disk ? disk.warning === true : (status ? status.ok === false : false)
+  readonly property string label: Model.barLabel(disk, false, status && status.ok === false)
 
   readonly property int refreshIntervalSec: {
     var n = Number(setting("refreshIntervalSec", 300))
@@ -171,12 +169,10 @@ Panel {
 
         Text {
           width: parent.width
-          visible: root.needsSetup || root.missingSmartctl || root.lastError !== ""
-          text: root.needsSetup
-            ? "Run setup-sudoers.sh once (passwordless smartctl -j)."
-            : (root.missingSmartctl
-              ? "Install smartmontools: omarchy pkg add smartmontools"
-              : root.lastError)
+          visible: root.lastError !== "" || (status && status.ok === false)
+          text: root.lastError !== ""
+            ? root.lastError
+            : (status && status.message ? String(status.message) : "Could not read disk SMART data.")
           color: root.warning ? (root.bar ? root.bar.urgent : Color.urgent) : root.contentDim
           font.family: root.contentFontFamily
           font.pixelSize: Style.font.bodySmall

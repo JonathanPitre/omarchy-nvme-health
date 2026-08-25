@@ -1,31 +1,23 @@
 # NVMe Health
 
-SMART disk health for the Omarchy Quattro bar: remaining life, power-on hours, reallocated sectors / media errors, and TBW.
+SMART disk health for the Omarchy Quattro bar: remaining life, power-on hours, media errors / reallocated sectors, and TBW.
 
-**Local development only** — not published to the marketplace.
+Reads SMART through **UDisks2** (already on Omarchy). No `smartctl`, no root, no sudoers.
 
-## Dependencies
-
-```sh
-omarchy pkg add smartmontools
-```
-
-`smartctl` needs root on this system. Install a narrow passwordless rule once:
+## Install
 
 ```sh
-cd ~/Projects/omarchy-nvme-health
-chmod +x setup-sudoers.sh status.py
-./setup-sudoers.sh
+omarchy plugin add https://github.com/OWNER/omarchy-nvme-health.git --enable
 ```
 
-## Install into the shell (local copy)
+Or from a local checkout:
 
 ```sh
 PLUGIN_ID=io.github.qadram.nvme-health
 PLUGIN_DIR="$HOME/.config/omarchy/plugins/$PLUGIN_ID"
 mkdir -p "$PLUGIN_DIR"
-cp -a manifest.json BarWidget.qml Panel.qml Model.js status.py setup-sudoers.sh "$PLUGIN_DIR/"
-chmod +x "$PLUGIN_DIR/status.py" "$PLUGIN_DIR/setup-sudoers.sh"
+cp -a manifest.json BarWidget.qml Panel.qml Model.js status.py "$PLUGIN_DIR/"
+chmod +x "$PLUGIN_DIR/status.py"
 omarchy plugin validate "$PLUGIN_DIR"
 omarchy-shell shell rescanPlugins
 omarchy plugin enable "$PLUGIN_ID" --section right
@@ -33,9 +25,9 @@ omarchy plugin enable "$PLUGIN_ID" --section right
 
 ## Usage
 
-- Left click: open details panel
-- Middle click / `R` in panel: refresh
-- Bar label: remaining life `%`, or `!` when warning / setup needed
+- **Left click:** open the details panel
+- **Middle click** (bar) or **R / Enter** (panel): refresh
+- Bar label: remaining life `%`, or `!` when something looks wrong
 
 ## Configure
 
@@ -43,13 +35,15 @@ omarchy plugin enable "$PLUGIN_ID" --section right
 omarchy bar move io.github.qadram.nvme-health --section right
 ```
 
-Optional inline settings in `~/.config/omarchy/shell.json`: `refreshIntervalSec`, `device` (e.g. `/dev/nvme0`).
+Optional settings on the widget entry in `~/.config/omarchy/shell.json`:
+
+- `refreshIntervalSec` — 60–3600 (default `300`)
+- `device` — e.g. `/dev/nvme0n1` (empty = first NVMe)
 
 ## Remove
 
 ```sh
 omarchy plugin remove io.github.qadram.nvme-health
-# optional: sudo rm /etc/sudoers.d/omarchy-nvme-health
 ```
 
 ## License

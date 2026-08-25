@@ -1,375 +1,339 @@
 #!/usr/bin/env python3
-"""Emit SMART health JSON for Omarchy NVMe Health bar widget.
+"""Emit disk SMART health JSON for the Omarchy NVMe Health bar widget.
 
-Uses `sudo -n /usr/bin/smartctl` for passwordless reads. Run setup-sudoers.sh once
-if sudo -n is not configured.
+Reads NVMe/ATA SMART through UDisks2 over the system bus — no root, no
+smartctl, no sudoers. Requires udisks2 (ships with Omarchy).
 """
 
 from __future__ import annotations
 
 import json
-import os
-import subprocess
 import sys
 from typing import Any
 
+import gi
 
-SMARTCTL = "/usr/bin/smartctl"
-SKIP_HINTS = ("megaraid", "cciss", "areca", "3ware", "sat+megaraid")
+gi.require_version("Gio", "2.0")
+gi.require_version("GLib", "2.0")
+from gi.repository import Gio, GLib  # noqa: E402
 
 
-def run_smartctl(args: list[str], timeout: float = 12.0) -> tuple[int, str, str]:
-  command = ["sudo", "-n", SMARTCTL, *args]
+UDISKS = "org.freedesktop.UDisks2"
+IFACE_DRIVE = "org.freedesktop.UDisks2.Drive"
+IFACE_NVME = "org.freedesktop.UDisks2.NVMe.Controller"
+IFACE_ATA = "org.freedesktop.UDisks2.Drive.Ata"
+IFACE_BLOCK = "org.freedesktop.UDisks2.Block"
+
+
+def bytes_to_path(value: Any) -> str:
+  if isinstance(value, (bytes, bytearray)):
+    return bytes(value).split(b"\x00", 1)[0].decode("utf-8", "replace")
+  if isinstance(value, str):
+    return value.split("\x00", 1)[0]
+  return ""
+
+
+def as_int(value: Any) -> int | None:
   try:
-    completed = subprocess.run(
-      command,
-      check=False,
-      capture_output=True,
-      text=True,
-      timeout=timeout,
-    )
-  except FileNotFoundError:
-    return 127, "", "smartctl or sudo not found"
-  except subprocess.TimeoutExpired:
-    return 124, "", "smartctl timed out"
-  return completed.returncode, completed.stdout or "", completed.stderr or ""
-
-
-def parse_json(text: str) -> dict[str, Any] | None:
-  text = (text or "").strip()
-  if not text:
+    if value is None:
+      return None
+    return int(value)
+  except (TypeError, ValueError):
     return None
-  try:
-    data = json.loads(text)
-  except json.JSONDecodeError:
+
+
+def bytes_to_tib(num_bytes: int | None) -> float | None:
+  if num_bytes is None or num_bytes < 0:
     return None
-  return data if isinstance(data, dict) else None
+  return round(num_bytes / (1024**4), 2)
 
 
-def smartctl_missing() -> bool:
-  return not os.path.isfile(SMARTCTL)
+def get_managed_objects() -> dict[str, dict[str, dict[str, Any]]]:
+  bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+  om = Gio.DBusProxy.new_sync(
+    bus,
+    Gio.DBusProxyFlags.NONE,
+    None,
+    UDISKS,
+    "/org/freedesktop/UDisks2",
+    "org.freedesktop.DBus.ObjectManager",
+    None,
+  )
+  result = om.call_sync("GetManagedObjects", None, Gio.DBusCallFlags.NONE, -1, None)
+  objs = result.unpack()
+  if isinstance(objs, tuple):
+    objs = objs[0]
+  return objs if isinstance(objs, dict) else {}
 
 
-def needs_setup(exit_code: int, stderr: str) -> bool:
-  if exit_code in (0, 4, 64, 68, 192, 196):  # smartctl bitflags: 4=FAILING often still JSON
+def call_method(path: str, iface: str, method: str) -> Any:
+  bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+  proxy = Gio.DBusProxy.new_sync(
+    bus,
+    Gio.DBusProxyFlags.NONE,
+    None,
+    UDISKS,
+    path,
+    iface,
+    None,
+  )
+  result = proxy.call_sync(
+    method,
+    GLib.Variant("(a{sv})", ([],)),
+    Gio.DBusCallFlags.NONE,
+    -1,
+    None,
+  )
+  return result.unpack()
+
+
+def block_paths_for_drive(objects: dict[str, Any], drive_path: str) -> list[str]:
+  names: list[str] = []
+  for path, ifaces in objects.items():
+    block = ifaces.get(IFACE_BLOCK)
+    if not block:
+      continue
+    if str(block.get("Drive") or "") != drive_path:
+      continue
+    # Skip partitions: they also point at the same Drive in some setups via
+    # the parent disk; prefer whole-disk nodes (no Partition iface).
+    if "org.freedesktop.UDisks2.Partition" in ifaces:
+      continue
+    device = bytes_to_path(block.get("Device") or block.get("PreferredDevice"))
+    if device:
+      names.append(device)
+  return names
+
+
+def device_matches(requested: str, candidates: list[str], drive_id: str) -> bool:
+  if not requested:
     return False
-  combined = (stderr or "").lower()
-  if "a password is required" in combined:
+  req = requested.strip()
+  if req == drive_id or req in candidates:
     return True
-  if "a terminal is required" in combined:
-    return True
-  if "sudo:" in combined and "password" in combined:
-    return True
-  if exit_code in (1, 126, 127) and "sudo" in combined:
-    return True
+  for name in candidates:
+    # /dev/nvme0 matches /dev/nvme0n1; /dev/sda matches /dev/sda
+    if name == req or name.startswith(req):
+      return True
+    if req.startswith(name):
+      return True
   return False
 
 
-def skip_device(name: str, type_name: str) -> bool:
-  blob = f"{name} {type_name}".lower()
-  if "/dev/dm-" in blob or blob.startswith("dm-"):
-    return True
-  return any(hint in blob for hint in SKIP_HINTS)
-
-
-def scan_devices() -> tuple[list[dict[str, str]], str | None, bool]:
-  code, stdout, stderr = run_smartctl(["--scan", "-j"])
-  if needs_setup(code, stderr):
-    return [], "needs_sudoers", True
-  if code == 127 or smartctl_missing():
-    return [], "missing_smartctl", False
-
-  data = parse_json(stdout)
-  devices: list[dict[str, str]] = []
-  if data and isinstance(data.get("devices"), list):
-    for entry in data["devices"]:
-      if not isinstance(entry, dict):
-        continue
-      name = str(entry.get("name") or "")
-      type_name = str(entry.get("type") or "")
-      if not name or skip_device(name, type_name):
-        continue
-      devices.append({"name": name, "type": type_name, "info": str(entry.get("info_name") or name)})
-  else:
-    # Fallback: plain text scan
-    code2, stdout2, stderr2 = run_smartctl(["--scan"])
-    if needs_setup(code2, stderr2):
-      return [], "needs_sudoers", True
-    for line in (stdout2 or "").splitlines():
-      parts = line.split("#", 1)[0].split()
-      if len(parts) < 1:
-        continue
-      name = parts[0]
-      type_name = parts[2] if len(parts) >= 3 and parts[1] == "-d" else ""
-      if skip_device(name, type_name):
-        continue
-      devices.append({"name": name, "type": type_name, "info": name})
-
-  return devices, None, False
-
-
-def ata_attr(table: Any, *names: str) -> int | None:
-  if not isinstance(table, list):
-    return None
+def ata_attr_raw(attrs: Any, *names: str) -> int | None:
+  # ATA SmartGetAttributes returns (a{sv} or aa{sv} depending on version).
   wanted = {n.lower() for n in names}
-  for row in table:
+  rows: list[Any]
+  if isinstance(attrs, tuple) and len(attrs) == 1:
+    attrs = attrs[0]
+  if isinstance(attrs, dict):
+    # Some builds return id->struct; flatten values
+    rows = list(attrs.values())
+  elif isinstance(attrs, list):
+    rows = attrs
+  else:
+    return None
+  for row in rows:
     if not isinstance(row, dict):
       continue
-    name = str(row.get("name") or "").lower()
+    name = str(row.get("name") or row.get("Name") or "").lower()
     if name not in wanted:
       continue
-    raw = row.get("raw")
-    if isinstance(raw, dict) and "value" in raw:
-      try:
-        return int(raw["value"])
-      except (TypeError, ValueError):
-        pass
-    try:
-      return int(row.get("raw_value"))
-    except (TypeError, ValueError):
-      pass
+    for key in ("raw", "value", "Raw", "Value"):
+      if key in row:
+        return as_int(row.get(key))
   return None
 
 
-def bytes_to_tib(num_bytes: float | None) -> float | None:
-  if num_bytes is None or num_bytes < 0:
-    return None
-  return round(num_bytes / (1024 ** 4), 2)
-
-
-def summarize(device: str, type_name: str, payload: dict[str, Any]) -> dict[str, Any]:
-  nvme = payload.get("nvme_smart_health_information_log")
-  if not isinstance(nvme, dict):
-    nvme = {}
-
-  ata_table = None
-  ata = payload.get("ata_smart_attributes")
-  if isinstance(ata, dict):
-    ata_table = ata.get("table")
-
-  model = ""
-  serial = ""
-  info = payload.get("model_name") or payload.get("scsi_model_name")
-  if isinstance(info, str):
-    model = info.strip()
-  model_info = payload.get("model_name")
-  if not model and isinstance(payload.get("device"), dict):
-    model = str(payload["device"].get("name") or "")
-  serial_val = payload.get("serial_number")
-  if isinstance(serial_val, str):
-    serial = serial_val.strip()
-
-  protocol = str(payload.get("device", {}).get("protocol") or type_name or "").lower() if isinstance(payload.get("device"), dict) else str(type_name or "").lower()
-  is_nvme = "nvme" in protocol or bool(nvme)
-
-  power_on_hours = None
-  pot = payload.get("power_on_time")
-  if isinstance(pot, dict) and "hours" in pot:
-    try:
-      power_on_hours = int(pot["hours"])
-    except (TypeError, ValueError):
-      power_on_hours = None
-  if power_on_hours is None:
-    power_on_hours = ata_attr(ata_table, "Power_On_Hours", "Power_On_Hour")
-
-  reallocated = ata_attr(ata_table, "Reallocated_Sector_Ct", "Reallocated_Sector_Count")
-  media_errors = None
-  if "media_errors" in nvme:
-    try:
-      media_errors = int(nvme["media_errors"])
-    except (TypeError, ValueError):
-      media_errors = None
-
-  available_spare = None
-  if "available_spare" in nvme:
-    try:
-      available_spare = int(nvme["available_spare"])
-    except (TypeError, ValueError):
-      available_spare = None
-
-  percentage_used = None
-  if "percentage_used" in nvme:
-    try:
-      percentage_used = int(nvme["percentage_used"])
-    except (TypeError, ValueError):
-      percentage_used = None
-
-  life_remaining = None
-  if percentage_used is not None:
-    life_remaining = max(0, 100 - percentage_used)
-  else:
-    plr = ata_attr(ata_table, "Percent_Lifetime_Remain", "Percent_Lifetime_Remaining")
-    if plr is not None:
-      life_remaining = max(0, min(100, plr))
-    else:
-      wear = ata_attr(ata_table, "Wear_Leveling_Count")
-      if wear is not None and 0 <= wear <= 100:
-        # Often normalized remaining; treat as remaining when high.
-        life_remaining = wear
-
-  tbw_tib = None
-  if "data_units_written" in nvme:
-    try:
-      # NVMe SMART: one data unit = 1000 * 512 bytes
-      tbw_tib = bytes_to_tib(int(nvme["data_units_written"]) * 512000)
-    except (TypeError, ValueError):
-      tbw_tib = None
-  if tbw_tib is None:
-    host_written = ata_attr(ata_table, "Total_LBAs_Written", "Host_Writes_32MiB", "Lifetime_Writes_GiB")
-    # Best-effort; leave null when unknown units
-    if host_written is not None and ata_attr(ata_table, "Lifetime_Writes_GiB") is not None:
-      tbw_tib = round(host_written / 1024, 2)
-
-  smart_status = payload.get("smart_status")
-  passed = None
-  if isinstance(smart_status, dict) and "passed" in smart_status:
-    passed = bool(smart_status["passed"])
-
-  critical_warning = 0
-  if "critical_warning" in nvme:
-    try:
-      critical_warning = int(nvme["critical_warning"])
-    except (TypeError, ValueError):
-      critical_warning = 0
-
+def summarize_nvme(drive: dict[str, Any], nvme_props: dict[str, Any], attrs: dict[str, Any], device: str) -> dict[str, Any]:
+  percent_used = as_int(attrs.get("percent_used"))
+  life_remaining = None if percent_used is None else max(0, 100 - percent_used)
+  spare = as_int(attrs.get("avail_spare"))
+  media_errors = as_int(attrs.get("media_errors"))
+  written = as_int(attrs.get("total_data_written"))
+  hours = as_int(nvme_props.get("SmartPowerOnHours"))
+  critical = nvme_props.get("SmartCriticalWarning") or []
   warning = False
-  if passed is False:
-    warning = True
-  if critical_warning:
-    warning = True
-  if reallocated is not None and reallocated > 0:
+  if isinstance(critical, (list, tuple)) and len(critical) > 0:
     warning = True
   if media_errors is not None and media_errors > 0:
     warning = True
-  if available_spare is not None and available_spare < 10:
+  if spare is not None and spare < 10:
     warning = True
   if life_remaining is not None and life_remaining <= 10:
     warning = True
 
   return {
     "device": device,
-    "type": type_name or ("nvme" if is_nvme else protocol),
-    "model": model,
-    "serial": serial,
-    "protocol": "nvme" if is_nvme else (protocol or "ata"),
-    "passed": passed,
+    "type": "nvme",
+    "model": str(drive.get("Model") or "").strip(),
+    "serial": str(drive.get("Serial") or "").strip(),
+    "protocol": "nvme",
+    "passed": None if warning else True,
     "warning": warning,
-    "powerOnHours": power_on_hours,
-    "reallocatedSectors": reallocated,
+    "powerOnHours": hours,
+    "reallocatedSectors": None,
     "mediaErrors": media_errors,
-    "availableSparePercent": available_spare,
-    "percentageUsed": percentage_used,
+    "availableSparePercent": spare,
+    "percentageUsed": percent_used,
     "lifeRemainingPercent": life_remaining,
-    "tbwTiB": tbw_tib,
-    "criticalWarning": critical_warning,
+    "tbwTiB": bytes_to_tib(written),
+    "criticalWarning": len(critical) if isinstance(critical, (list, tuple)) else 0,
   }
 
 
-def pick_device(devices: list[dict[str, str]], requested: str) -> dict[str, str] | None:
-  if requested:
-    for entry in devices:
-      if entry["name"] == requested:
-        return entry
-    return {"name": requested, "type": "", "info": requested}
+def summarize_ata(drive: dict[str, Any], ata_props: dict[str, Any], attrs: Any, device: str) -> dict[str, Any]:
+  hours = ata_attr_raw(attrs, "power_on_hours", "Power_On_Hours")
+  if hours is None:
+    seconds = as_int(ata_props.get("SmartPowerOnSeconds"))
+    if seconds is not None:
+      hours = seconds // 3600
+  reallocated = ata_attr_raw(attrs, "reallocated_sector_ct", "Reallocated_Sector_Ct")
+  life = ata_attr_raw(attrs, "percent_lifetime_remain", "Percent_Lifetime_Remain", "Percent_Lifetime_Remaining")
+  failing = bool(ata_props.get("SmartFailing"))
+  warning = failing or (reallocated is not None and reallocated > 0) or (life is not None and life <= 10)
+  return {
+    "device": device,
+    "type": "ata",
+    "model": str(drive.get("Model") or "").strip(),
+    "serial": str(drive.get("Serial") or "").strip(),
+    "protocol": "ata",
+    "passed": (not failing) if ata_props.get("SmartFailing") is not None else None,
+    "warning": warning,
+    "powerOnHours": hours,
+    "reallocatedSectors": reallocated,
+    "mediaErrors": None,
+    "availableSparePercent": None,
+    "percentageUsed": None if life is None else max(0, 100 - life),
+    "lifeRemainingPercent": life,
+    "tbwTiB": None,
+    "criticalWarning": 0,
+  }
 
-  for entry in devices:
-    blob = f'{entry["name"]} {entry["type"]}'.lower()
-    if "nvme" in blob:
-      return entry
-  return devices[0] if devices else None
+
+def collect_disks(objects: dict[str, Any]) -> list[dict[str, Any]]:
+  disks: list[dict[str, Any]] = []
+  for path, ifaces in objects.items():
+    drive = ifaces.get(IFACE_DRIVE)
+    if not drive:
+      continue
+    # Skip removable optical / empty media
+    if drive.get("Optical") or drive.get("MediaRemovable"):
+      continue
+    if drive.get("MediaAvailable") is False:
+      continue
+
+    is_nvme = IFACE_NVME in ifaces
+    is_ata = IFACE_ATA in ifaces
+    if not is_nvme and not is_ata:
+      continue
+
+    blocks = block_paths_for_drive(objects, path)
+    device = blocks[0] if blocks else path
+    iface = IFACE_NVME if is_nvme else IFACE_ATA
+    try:
+      call_method(path, iface, "SmartUpdate")
+    except Exception:
+      pass
+    try:
+      attrs_pack = call_method(path, iface, "SmartGetAttributes")
+    except Exception as exc:
+      disks.append(
+        {
+          "ok": False,
+          "path": path,
+          "device": device,
+          "error": str(exc),
+          "protocol": "nvme" if is_nvme else "ata",
+          "model": str(drive.get("Model") or "").strip(),
+        }
+      )
+      continue
+
+    attrs = attrs_pack[0] if isinstance(attrs_pack, tuple) else attrs_pack
+    if is_nvme:
+      summary = summarize_nvme(drive, ifaces.get(IFACE_NVME) or {}, attrs if isinstance(attrs, dict) else {}, device)
+    else:
+      summary = summarize_ata(drive, ifaces.get(IFACE_ATA) or {}, attrs, device)
+    summary["path"] = path
+    summary["candidates"] = blocks
+    disks.append(summary)
+  return disks
+
+
+def pick_disk(disks: list[dict[str, Any]], requested: str) -> dict[str, Any] | None:
+  healthy = [d for d in disks if d.get("protocol") in ("nvme", "ata") and "lifeRemainingPercent" in d]
+  if requested:
+    for d in healthy:
+      if device_matches(requested, d.get("candidates") or [d.get("device") or ""], d.get("path") or ""):
+        return d
+    return None
+  for d in healthy:
+    if d.get("protocol") == "nvme":
+      return d
+  return healthy[0] if healthy else None
 
 
 def main() -> int:
-  requested = ""
-  if len(sys.argv) > 1:
-    requested = sys.argv[1].strip()
-
-  if smartctl_missing():
-    print(json.dumps({
-      "ok": False,
-      "error": "missing_smartctl",
-      "message": "Install smartmontools (omarchy pkg add smartmontools).",
-      "needsSetup": False,
-      "devices": [],
-      "disk": None,
-    }))
+  requested = sys.argv[1].strip() if len(sys.argv) > 1 else ""
+  try:
+    objects = get_managed_objects()
+  except Exception as exc:
+    print(
+      json.dumps(
+        {
+          "ok": False,
+          "error": "udisks_unavailable",
+          "message": f"Could not talk to UDisks2: {exc}",
+          "needsSetup": False,
+          "devices": [],
+          "disk": None,
+        }
+      )
+    )
     return 0
 
-  devices, scan_error, setup = scan_devices()
-  if setup:
-    print(json.dumps({
-      "ok": False,
-      "error": "needs_sudoers",
-      "message": "Run setup-sudoers.sh once so sudo -n smartctl works.",
-      "needsSetup": True,
-      "devices": [],
-      "disk": None,
-    }))
-    return 0
+  disks = collect_disks(objects)
+  devices = [
+    {
+      "name": d.get("device") or d.get("path"),
+      "type": d.get("protocol") or d.get("type") or "",
+      "info": d.get("model") or d.get("device") or "",
+    }
+    for d in disks
+    if d.get("protocol") in ("nvme", "ata")
+  ]
 
-  if scan_error == "missing_smartctl":
-    print(json.dumps({
-      "ok": False,
-      "error": "missing_smartctl",
-      "message": "Install smartmontools (omarchy pkg add smartmontools).",
-      "needsSetup": False,
-      "devices": [],
-      "disk": None,
-    }))
-    return 0
-
-  chosen = pick_device(devices, requested)
+  chosen = pick_disk(disks, requested)
   if not chosen:
-    print(json.dumps({
-      "ok": False,
-      "error": "no_devices",
-      "message": "No SMART devices found.",
-      "needsSetup": False,
-      "devices": devices,
-      "disk": None,
-    }))
+    print(
+      json.dumps(
+        {
+          "ok": False,
+          "error": "no_devices",
+          "message": "No NVMe/ATA drives with SMART data were found.",
+          "needsSetup": False,
+          "devices": devices,
+          "disk": None,
+        }
+      )
+    )
     return 0
 
-  args = ["-j", "-a", chosen["name"]]
-  if chosen.get("type"):
-    args = ["-j", "-d", chosen["type"], "-a", chosen["name"]]
-
-  code, stdout, stderr = run_smartctl(args)
-  if needs_setup(code, stderr):
-    print(json.dumps({
-      "ok": False,
-      "error": "needs_sudoers",
-      "message": "Run setup-sudoers.sh once so sudo -n smartctl works.",
-      "needsSetup": True,
-      "devices": devices,
-      "disk": None,
-    }))
-    return 0
-
-  payload = parse_json(stdout)
-  # smartctl uses exit bitflags; JSON can still be valid with non-zero status
-  if payload is None:
-    print(json.dumps({
-      "ok": False,
-      "error": "smartctl_failed",
-      "message": (stderr or stdout or "smartctl failed").strip()[:240],
-      "needsSetup": False,
-      "devices": devices,
-      "disk": None,
-      "exitCode": code,
-    }))
-    return 0
-
-  disk = summarize(chosen["name"], chosen.get("type") or "", payload)
-  print(json.dumps({
-    "ok": True,
-    "error": "",
-    "message": "",
-    "needsSetup": False,
-    "devices": devices,
-    "disk": disk,
-    "exitCode": code,
-  }))
+  # Strip helper fields before emitting
+  disk = {k: v for k, v in chosen.items() if k not in ("path", "candidates", "ok", "error")}
+  print(
+    json.dumps(
+      {
+        "ok": True,
+        "error": "",
+        "message": "",
+        "needsSetup": False,
+        "devices": devices,
+        "disk": disk,
+      }
+    )
+  )
   return 0
 
 

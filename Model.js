@@ -28,9 +28,8 @@ function formatPercent(value) {
   return Math.round(Number(value)) + "%"
 }
 
-function barLabel(disk, needsSetup, missingSmartctl) {
-  if (missingSmartctl) return "?"
-  if (needsSetup) return "!"
+function barLabel(disk, _needsSetup, unavailable) {
+  if (unavailable && !disk) return "?"
   if (!disk) return "—"
   if (disk.warning) return "!"
   if (disk.lifeRemainingPercent === null || disk.lifeRemainingPercent === undefined)
