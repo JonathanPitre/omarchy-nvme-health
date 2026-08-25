@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.qadram.nvme-health",
+  "name": "NVMe Health",
+  "version": "1.0.0",
+  "author": "qadram",
+  "license": "MIT",
+  "description": "SMART disk health in the Omarchy bar: power-on hours, reallocated sectors, TBW, and remaining life.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "NVMe Health",
+    "description": "SMART health summary with remaining life estimate.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 300,
+      "device": ""
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 60,
+        "max": 3600,
+        "step": 30,
+        "defaultValue": 300
+      },
+      {
+        "key": "device",
+        "type": "string",
+        "label": "Device path",
+        "defaultValue": "",
+        "description": "Empty selects the first NVMe (then first physical disk) from smartctl --scan."
+      }
+    ]
+  }
+}
