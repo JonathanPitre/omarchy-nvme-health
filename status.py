@@ -30,6 +30,11 @@ def bytes_to_path(value: Any) -> str:
     return bytes(value).split(b"\x00", 1)[0].decode("utf-8", "replace")
   if isinstance(value, str):
     return value.split("\x00", 1)[0]
+  if isinstance(value, (list, tuple)):
+    try:
+      return bytes(int(x) & 0xFF for x in value).split(b"\x00", 1)[0].decode("utf-8", "replace")
+    except (TypeError, ValueError):
+      return ""
   return ""
 
 
