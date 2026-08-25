@@ -1,5 +1,7 @@
 # NVMe Health
 
+![NVMe Health panel on Omarchy](preview.png)
+
 SMART disk health for the Omarchy Quattro bar: remaining life, power-on hours, media errors / reallocated sectors, and TBW.
 
 Reads SMART through **UDisks2** (already on Omarchy). No `smartctl`, no root, no sudoers.
