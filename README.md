@@ -7,7 +7,7 @@ Reads SMART through **UDisks2** (already on Omarchy). No `smartctl`, no root, no
 ## Install
 
 ```sh
-omarchy plugin add https://github.com/OWNER/omarchy-nvme-health.git --enable
+omarchy plugin add https://github.com/qadram/omarchy-nvme-health.git --enable
 ```
 
 Or from a local checkout:
