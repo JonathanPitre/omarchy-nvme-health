@@ -1,6 +1,8 @@
 # NVMe Health
 
-![NVMe Health panel on Omarchy](preview.png)
+![System disk (Omarchy)](preview.png)
+
+![Second disk](preview-samsung.png)
 
 SMART disk health for the Omarchy Quattro bar: remaining life, power-on hours, media errors / reallocated sectors, and TBW.
 
