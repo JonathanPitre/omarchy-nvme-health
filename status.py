@@ -27,6 +27,7 @@ IFACE_NVME = "org.freedesktop.UDisks2.NVMe.Controller"
 IFACE_ATA = "org.freedesktop.UDisks2.Drive.Ata"
 IFACE_BLOCK = "org.freedesktop.UDisks2.Block"
 IFACE_PARTITION = "org.freedesktop.UDisks2.Partition"
+IFACE_FS = "org.freedesktop.UDisks2.Filesystem"
 
 # Hard ceilings: UDisks GetManagedObjects can be large; keep parsing and
 # the document we emit bounded so the shell/QML cannot be flooded.
@@ -43,6 +44,7 @@ DBUS_TIMEOUT_MS = 10_000
 SETUP_TIMEOUT_SEC = 10
 # Wall clock for the whole status.py run (QML watchdog should match).
 PROCESS_DEADLINE_SEC = 45
+MAX_SMART_DISKS = 8
 
 NVME_ATTR_KEYS = ("percent_used", "avail_spare", "media_errors", "total_data_written")
 
@@ -195,6 +197,16 @@ def slim_managed_objects(objs: dict[str, Any]) -> dict[str, dict[str, Any]]:
       }
       if IFACE_PARTITION in ifaces:
         entry[IFACE_PARTITION] = True
+      if IFACE_FS in ifaces:
+        fs = ifaces.get(IFACE_FS) or {}
+        mps = fs.get("MountPoints") or []
+        decoded: list[str] = []
+        if isinstance(mps, (list, tuple)):
+          for mp in list(mps)[:16]:
+            point = bytes_to_path(mp)
+            if point:
+              decoded.append(point)
+        entry[IFACE_FS] = {"MountPoints": decoded}
 
     if entry:
       slim[safe_path] = entry
@@ -266,6 +278,22 @@ def block_paths_for_drive(objects: dict[str, Any], drive_path: str) -> list[str]
     if device:
       names.append(device)
   return names
+
+
+def mounts_for_drive(objects: dict[str, Any], drive_path: str) -> list[str]:
+  found: list[str] = []
+  for _path, ifaces in objects.items():
+    block = ifaces.get(IFACE_BLOCK)
+    if not block or str(block.get("Drive") or "") != drive_path:
+      continue
+    fs = ifaces.get(IFACE_FS) or {}
+    for mp in fs.get("MountPoints") or []:
+      text_mp = clamp_str(mp, MAX_PATH_LEN)
+      if text_mp and text_mp not in found:
+        found.append(text_mp)
+      if len(found) >= 16:
+        return found
+  return found
 
 
 def device_matches(requested: str, candidates: list[str], drive_id: str) -> str | None:
@@ -420,6 +448,7 @@ def enumerate_drives(objects: dict[str, Any], deadline: float) -> list[dict[str,
         "model": clamp_str(drive.get("Model")),
         "drive": drive,
         "ctrl_props": ifaces.get(IFACE_NVME if is_nvme else IFACE_ATA) or {},
+        "mounts": mounts_for_drive(objects, path),
       }
     )
   return disks
@@ -443,6 +472,12 @@ def pick_disk(disks: list[dict[str, Any]], requested: str) -> dict[str, Any] | N
     if len(prefix) == 1:
       return prefix[0]
     return None
+  for d in disks:
+    if "/" in (d.get("mounts") or []):
+      return d
+  for d in disks:
+    if d.get("mounts"):
+      return d
   for d in disks:
     if d.get("protocol") == "nvme":
       return d
@@ -541,16 +576,35 @@ def main() -> int:
     )
     return 0
 
-  summary = fetch_smart(chosen)
-  if summary.get("ok") is False or "lifeRemainingPercent" not in summary:
+  summaries: list[dict[str, Any]] = []
+  for d in disks[:MAX_SMART_DISKS]:
+    if time.monotonic() > deadline:
+      break
+    summary = fetch_smart(d)
+    if summary.get("ok") is False or "lifeRemainingPercent" not in summary:
+      continue
+    summaries.append(summary)
+
+  disk = None
+  if chosen:
+    want = chosen.get("device")
+    for summary in summaries:
+      if summary.get("device") == want:
+        disk = summary
+        break
+  if disk is None and summaries:
+    disk = summaries[0]
+
+  if disk is None:
     emit(
       {
         "ok": False,
         "error": "smart_unavailable",
-        "message": clamp_str(summary.get("error") or "Could not read SMART attributes.", MAX_MESSAGE_LEN),
+        "message": "Could not read SMART attributes.",
         "needsSetup": False,
         "devices": devices,
         "disk": None,
+        "disks": [],
       }
     )
     return 0
@@ -562,7 +616,8 @@ def main() -> int:
       "message": "",
       "needsSetup": False,
       "devices": devices,
-      "disk": summary,
+      "disk": disk,
+      "disks": summaries,
     }
   )
   return 0

@@ -28,8 +28,11 @@ omarchy plugin enable "$PLUGIN_ID" --section right
 ## Usage
 
 - **Left click:** open the details panel
+- **Right click** (bar): toggle remaining-life `%` on the bar (hidden by default)
 - **Middle click** (bar) or **R / Enter** (panel): refresh
-- Bar label: remaining life `%`, or `!` when something looks wrong
+- **← / →** (or **h / l**, **p / n**, or the ‹ › buttons): switch disk
+- Bar icon is `!` when any disk looks wrong
+- Default disk is the one backing `/` (the Omarchy system drive)
 
 ## Configure
 
@@ -40,7 +43,8 @@ omarchy bar move io.github.qadram.nvme-health --section right
 Optional settings on the widget entry in `~/.config/omarchy/shell.json`:
 
 - `refreshIntervalSec` — 60–3600 (default `300`)
-- `device` — e.g. `/dev/nvme0n1` (empty = first NVMe)
+- `device` — e.g. `/dev/nvme0n1` (empty = system disk, the drive mounted at `/`)
+- `showPercentage` — `true` to show remaining life on the bar (default hidden)
 
 ## Remove
 
