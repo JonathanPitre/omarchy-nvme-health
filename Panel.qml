@@ -33,7 +33,7 @@ Panel {
   }
   readonly property bool warning: {
     for (var i = 0; i < disks.length; i++) {
-      if (disks[i] && disks[i].warning === true) return true
+      if (disks[i] && (disks[i].warning === true || disks[i].ok === false)) return true
     }
     return status ? status.ok === false : false
   }
@@ -229,8 +229,8 @@ Panel {
       }
       onTextKey: function(t) {
         if (t === "r" || t === "R") root.refresh()
-        else if (t === "n" || t === "N") root.cycleDisk(1)
-        else if (t === "p" || t === "P") root.cycleDisk(-1)
+        else if (t === "n" || t === "N" || t === "l" || t === "L") root.cycleDisk(1)
+        else if (t === "p" || t === "P" || t === "h" || t === "H") root.cycleDisk(-1)
       }
 
       Column {
@@ -293,7 +293,9 @@ Panel {
           text: {
             if (!shownDisk || !shownDisk.model) return "Disk SMART"
             var name = String(shownDisk.model)
-            var isSystem = disk && shownDisk.device && disk.device === shownDisk.device
+            var isSystem = shownDisk.system === true
+            if (shownDisk.system === undefined)
+              isSystem = !!(disk && shownDisk.device && disk.device === shownDisk.device)
             return isSystem ? name + "  (system)" : name
           }
           color: root.contentForeground
@@ -314,12 +316,17 @@ Panel {
 
         Text {
           width: parent.width
-          visible: root.lastError !== "" || (status && status.ok === false)
-          text: root.lastError !== ""
-            ? root.lastError
-            : (status && status.message
+          visible: root.lastError !== "" || (shownDisk && shownDisk.ok === false) || (status && status.ok === false)
+          text: {
+            if (root.lastError !== "") return root.lastError
+            if (shownDisk && shownDisk.ok === false)
+              return shownDisk.error
+                ? String(shownDisk.error).substring(0, 256)
+                : "Could not read SMART data for this disk."
+            return (status && status.message
                 ? String(status.message).substring(0, 256)
                 : "Could not read disk SMART data.")
+          }
           color: root.warning ? (root.bar ? root.bar.urgent : Color.urgent) : root.contentDim
           font.family: root.contentFontFamily
           font.pixelSize: Style.font.bodySmall
@@ -331,6 +338,7 @@ Panel {
           visible: !!shownDisk
           text: {
             if (!shownDisk) return ""
+            if (shownDisk.ok === false) return "Read failed"
             if (shownDisk.passed === true) return "SMART: PASSED"
             if (shownDisk.passed === false) return "SMART: FAILED"
             return root.loading ? "Refreshing…" : "SMART status"

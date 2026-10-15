@@ -16,7 +16,7 @@ BarWidget {
 
   readonly property string labelText: panelLoader.item ? String(panelLoader.item.label || "") : ""
   readonly property bool warning: panelLoader.item ? panelLoader.item.warning === true : false
-  readonly property bool showPercentage: setting("showPercentage", false) === true
+  readonly property bool showPercentage: setting("showPercentage", true) === true
 
   function open() {
     if (panelLoader.item) panelLoader.item.open()

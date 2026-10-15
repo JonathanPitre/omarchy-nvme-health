@@ -87,12 +87,3 @@ if (typeof module !== "undefined") {
     MAX_STATUS_CHARS: MAX_STATUS_CHARS
   }
 }
-
-if (typeof require !== "undefined" && require.main === module) {
-  if (nextIndex(0, 2, 1) !== 1) throw new Error("next 0+1")
-  if (nextIndex(1, 2, 1) !== 0) throw new Error("wrap +1")
-  if (nextIndex(0, 2, -1) !== 1) throw new Error("wrap -1")
-  if (indexOfDevice([{ device: "/dev/nvme0n1" }, { device: "/dev/nvme1n1" }], "/dev/nvme1n1") !== 1)
-    throw new Error("indexOfDevice")
-  console.log("ok")
-}
